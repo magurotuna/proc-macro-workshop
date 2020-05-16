@@ -2,7 +2,10 @@ extern crate proc_macro;
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, Data, DeriveInput, Fields, FieldsNamed, Ident};
+use syn::{
+    parse_macro_input, Data, DeriveInput, Fields, FieldsNamed, GenericArgument, Ident, Path,
+    PathArguments, PathSegment, Type, TypePath,
+};
 
 #[proc_macro_derive(Builder)]
 pub fn builder(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
@@ -42,8 +45,14 @@ fn builder_fields(data: &Data) -> TokenStream {
     let option_wrapped = fields.named.iter().map(|f| {
         let ty = &f.ty;
         let ident = &f.ident;
-        quote! {
-            #ident: Option<#ty>
+        if type_is_option(ty) {
+            quote! {
+                #ident: #ty
+            }
+        } else {
+            quote! {
+                #ident: Option<#ty>
+            }
         }
     });
     quote! {
@@ -69,10 +78,20 @@ fn builder_setters(data: &Data) -> TokenStream {
     let setters = fields.named.iter().map(|f| {
         let ident = &f.ident;
         let ty = &f.ty;
-        quote! {
-            fn #ident(&mut self, #ident: #ty) -> &mut Self {
-                self.#ident = Some(#ident);
-                self
+        if type_is_option(ty) {
+            let unwrapped_type = option_inner_type(ty);
+            quote! {
+                fn #ident(&mut self, #ident: #unwrapped_type) -> &mut Self {
+                    self.#ident = Some(#ident);
+                    self
+                }
+            }
+        } else {
+            quote! {
+                fn #ident(&mut self, #ident: #ty) -> &mut Self {
+                    self.#ident = Some(#ident);
+                    self
+                }
             }
         }
     });
@@ -83,19 +102,30 @@ fn builder_setters(data: &Data) -> TokenStream {
 
 fn builder_build(data: &Data, struct_name: &Ident) -> TokenStream {
     let fields = extract_fields(data);
-    let set_check = fields.named.iter().map(|f| {
+    let set_check = fields.named.iter().filter_map(|f| {
         let ident = &f.ident;
+        let ty = &f.ty;
+        if type_is_option(ty) {
+            return None;
+        }
         let err = format!("field `{}` is not set.", ident.as_ref().unwrap());
-        quote! {
+        Some(quote! {
             if self.#ident.is_none() {
                 return Err(#err.into());
             }
-        }
+        })
     });
     let build_values = fields.named.iter().map(|f| {
         let ident = &f.ident;
-        quote! {
-            #ident: self.#ident.clone().unwrap()
+        let ty = &f.ty;
+        if type_is_option(ty) {
+            quote! {
+                #ident: self.#ident.clone()
+            }
+        } else {
+            quote! {
+                #ident: self.#ident.clone().unwrap()
+            }
         }
     });
     quote! {
@@ -114,5 +144,34 @@ fn extract_fields(data: &Data) -> &FieldsNamed {
             _ => panic!("all fields must be named."),
         },
         _ => panic!("struct expected, but got other item."),
+    }
+}
+
+fn type_is_option(ty: &Type) -> bool {
+    extract_last_path_segment(ty)
+        .map(|path_seg| path_seg.ident == "Option")
+        .unwrap_or(false)
+}
+
+fn option_inner_type(ty: &Type) -> &GenericArgument {
+    extract_last_path_segment(ty)
+        .and_then(|path_seg| match path_seg.arguments {
+            PathArguments::AngleBracketed(ref gen_arg) => gen_arg.args.first(),
+            _ => None,
+        })
+        .expect("Option wrapped type cannot be found.")
+}
+
+fn extract_last_path_segment(ty: &Type) -> Option<&PathSegment> {
+    match ty {
+        &Type::Path(TypePath {
+            qself: _,
+            path:
+                Path {
+                    segments: ref seg,
+                    leading_colon: _,
+                },
+        }) => seg.last(),
+        _ => None,
     }
 }
