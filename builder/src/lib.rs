@@ -3,9 +3,9 @@ extern crate proc_macro;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
-    parse_macro_input, AngleBracketedGenericArguments, Data, DeriveInput, Fields, FieldsNamed,
-    GenericArgument, Ident, Lit, Meta, MetaList, MetaNameValue, NestedMeta, Path, PathArguments,
-    PathSegment, Type, TypePath,
+    parse_macro_input, AngleBracketedGenericArguments, Data, DeriveInput, Error, Fields,
+    FieldsNamed, GenericArgument, Ident, Lit, Meta, MetaList, MetaNameValue, NestedMeta, Path,
+    PathArguments, PathSegment, Type, TypePath,
 };
 
 #[proc_macro_derive(Builder, attributes(builder))]
@@ -81,34 +81,51 @@ fn builder_setters(data: &Data) -> TokenStream {
         let ty = &f.ty;
         let attrs = &f.attrs;
 
+        enum AttrParseResult {
+            Value(String),
+            InvalidKey(Meta),
+        };
+
         let each_lit = attrs.iter().find_map(|attr| match attr.parse_meta() {
-            Ok(Meta::List(MetaList {
-                ref path,
-                paren_token: _,
-                ref nested,
-            })) => {
-                path.get_ident().map(|i| i == "builder")?;
-                nested.first().and_then(|nm| match nm {
-                    NestedMeta::Meta(Meta::NameValue(MetaNameValue {
-                        ref path,
-                        eq_token: _,
-                        lit: Lit::Str(ref litstr),
-                    })) => {
-                        path.get_ident().map(|i| i == "each")?;
-                        Some(litstr.value())
-                    }
-                    _ => None,
-                })
-            }
+            Ok(meta) => match meta {
+                Meta::List(MetaList {
+                    ref path,
+                    paren_token: _,
+                    ref nested,
+                }) => {
+                    path.get_ident().map(|i| i == "builder")?;
+                    nested.first().and_then(|nm| match nm {
+                        NestedMeta::Meta(Meta::NameValue(MetaNameValue {
+                            ref path,
+                            eq_token: _,
+                            lit: Lit::Str(ref litstr),
+                        })) => {
+                            if !path.get_ident().map(|i| i == "each").unwrap_or(false) {
+                                return Some(AttrParseResult::InvalidKey(meta.clone()));
+                            }
+                            Some(AttrParseResult::Value(litstr.value()))
+                        }
+                        _ => None,
+                    })
+                }
+                _ => None,
+            },
             _ => None,
         });
 
+        if let Some(AttrParseResult::InvalidKey(ref meta)) = each_lit {
+            return Error::new_spanned(meta, "expected `builder(each = \"...\")`")
+                .to_compile_error();
+        }
+
         if !type_is_vec(unwrap_option(ty)) && each_lit.is_some() {
-            panic!("`each` attribute can be attached only to a field whose type is Vec<..>.");
+            return Error::new_spanned(ty, "barrrrr").to_compile_error();
         }
 
         match each_lit {
-            Some(ref lit) if ident.as_ref().map(|i| i == lit).unwrap_or(false) => {
+            Some(AttrParseResult::Value(ref lit))
+                if ident.as_ref().map(|i| i == lit).unwrap_or(false) =>
+            {
                 let option_vec_unwrapped = unwrap_option_vec(ty);
                 quote! {
                     fn #ident(&mut self, #ident: #option_vec_unwrapped) -> &mut Self {
@@ -122,7 +139,7 @@ fn builder_setters(data: &Data) -> TokenStream {
                     }
                 }
             }
-            Some(ref lit) => {
+            Some(AttrParseResult::Value(ref lit)) => {
                 let option_vec_unwrapped = unwrap_option_vec(ty);
                 let option_unwrapped = unwrap_option(ty);
                 let lit = format_ident!("{}", lit);
@@ -143,6 +160,7 @@ fn builder_setters(data: &Data) -> TokenStream {
                     }
                 }
             }
+            Some(AttrParseResult::InvalidKey(_)) => unreachable!(),
             None => {
                 let option_unwrapped = unwrap_option(ty);
                 quote! {
