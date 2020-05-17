@@ -33,7 +33,7 @@ pub fn builder(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
         impl #builder_name {
             #setters
 
-            pub fn build(&mut self) -> Result<#struct_name, Box<dyn std::error::Error>> {
+            pub fn build(&mut self) -> std::result::Result<#struct_name, std::boxed::Box<dyn std::error::Error>> {
                 #build
             }
         }
@@ -52,7 +52,7 @@ fn builder_fields(data: &Data) -> TokenStream {
             }
         } else {
             quote! {
-                #ident: Option<#ty>
+                #ident: std::option::Option<#ty>
             }
         }
     });
@@ -66,7 +66,7 @@ fn builder_fields_init(data: &Data) -> TokenStream {
     let value_none = fields.named.iter().map(|f| {
         let ident = &f.ident;
         quote! {
-            #ident: None
+            #ident: std::option::Option::None
         }
     });
     quote! {
@@ -130,9 +130,9 @@ fn builder_setters(data: &Data) -> TokenStream {
                 quote! {
                     fn #ident(&mut self, #ident: #option_vec_unwrapped) -> &mut Self {
                         match self.#ident {
-                            Some(ref mut v) => v.push(#ident),
-                            None => {
-                                self.#ident = Some(vec![#ident]);
+                            std::option::Option::Some(ref mut v) => v.push(#ident),
+                            std::option::Option::None => {
+                                self.#ident = std::option::Option::Some(vec![#ident]);
                             }
                         }
                         self
@@ -145,15 +145,15 @@ fn builder_setters(data: &Data) -> TokenStream {
                 let lit = format_ident!("{}", lit);
                 quote! {
                     fn #ident(&mut self, #ident: #option_unwrapped) -> &mut Self {
-                        self.#ident = Some(#ident);
+                        self.#ident = std::option::Option::Some(#ident);
                         self
                     }
 
                     fn #lit(&mut self, #lit: #option_vec_unwrapped) -> &mut Self {
                         match self.#ident {
-                            Some(ref mut v) => v.push(#lit),
-                            None => {
-                                self.#ident = Some(vec![#lit]);
+                            std::option::Option::Some(ref mut v) => v.push(#lit),
+                            std::option::Option::None => {
+                                self.#ident = std::option::Option::Some(vec![#lit]);
                             }
                         }
                         self
@@ -165,7 +165,7 @@ fn builder_setters(data: &Data) -> TokenStream {
                 let option_unwrapped = unwrap_option(ty);
                 quote! {
                     fn #ident(&mut self, #ident: #option_unwrapped) -> &mut Self {
-                        self.#ident = Some(#ident);
+                        self.#ident = std::option::Option::Some(#ident);
                         self
                     }
                 }
@@ -201,7 +201,7 @@ fn builder_build(data: &Data, struct_name: &Ident) -> TokenStream {
             }
         } else if type_is_vec(ty) {
             quote! {
-                #ident: self.#ident.clone().unwrap_or_else(Vec::new)
+                #ident: self.#ident.clone().unwrap_or_else(std::vec::Vec::new)
             }
         } else {
             quote! {
