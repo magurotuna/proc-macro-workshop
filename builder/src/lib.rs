@@ -3,11 +3,12 @@ extern crate proc_macro;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
-    parse_macro_input, Data, DeriveInput, Fields, FieldsNamed, GenericArgument, Ident, Path,
-    PathArguments, PathSegment, Type, TypePath,
+    parse_macro_input, AngleBracketedGenericArguments, Data, DeriveInput, Fields, FieldsNamed,
+    GenericArgument, Ident, Lit, Meta, MetaList, MetaNameValue, NestedMeta, Path, PathArguments,
+    PathSegment, Type, TypePath,
 };
 
-#[proc_macro_derive(Builder)]
+#[proc_macro_derive(Builder, attributes(builder))]
 pub fn builder(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let struct_name = input.ident;
@@ -78,19 +79,77 @@ fn builder_setters(data: &Data) -> TokenStream {
     let setters = fields.named.iter().map(|f| {
         let ident = &f.ident;
         let ty = &f.ty;
-        if type_is_option(ty) {
-            let unwrapped_type = option_inner_type(ty);
-            quote! {
-                fn #ident(&mut self, #ident: #unwrapped_type) -> &mut Self {
-                    self.#ident = Some(#ident);
-                    self
+        let attrs = &f.attrs;
+
+        let each_lit = attrs.iter().find_map(|attr| match attr.parse_meta() {
+            Ok(Meta::List(MetaList {
+                ref path,
+                paren_token: _,
+                ref nested,
+            })) => {
+                path.get_ident().map(|i| i == "builder")?;
+                nested.first().and_then(|nm| match nm {
+                    NestedMeta::Meta(Meta::NameValue(MetaNameValue {
+                        ref path,
+                        eq_token: _,
+                        lit: Lit::Str(ref litstr),
+                    })) => {
+                        path.get_ident().map(|i| i == "each")?;
+                        Some(litstr.value())
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        });
+
+        if !type_is_vec(unwrap_option(ty)) && each_lit.is_some() {
+            panic!("`each` attribute can be attached only to a field whose type is Vec<..>.");
+        }
+
+        match each_lit {
+            Some(ref lit) if ident.as_ref().map(|i| i == lit).unwrap_or(false) => {
+                let option_vec_unwrapped = unwrap_option_vec(ty);
+                quote! {
+                    fn #ident(&mut self, #ident: #option_vec_unwrapped) -> &mut Self {
+                        match self.#ident {
+                            Some(ref mut v) => v.push(#ident),
+                            None => {
+                                self.#ident = Some(vec![#ident]);
+                            }
+                        }
+                        self
+                    }
                 }
             }
-        } else {
-            quote! {
-                fn #ident(&mut self, #ident: #ty) -> &mut Self {
-                    self.#ident = Some(#ident);
-                    self
+            Some(ref lit) => {
+                let option_vec_unwrapped = unwrap_option_vec(ty);
+                let option_unwrapped = unwrap_option(ty);
+                let lit = format_ident!("{}", lit);
+                quote! {
+                    fn #ident(&mut self, #ident: #option_unwrapped) -> &mut Self {
+                        self.#ident = Some(#ident);
+                        self
+                    }
+
+                    fn #lit(&mut self, #lit: #option_vec_unwrapped) -> &mut Self {
+                        match self.#ident {
+                            Some(ref mut v) => v.push(#lit),
+                            None => {
+                                self.#ident = Some(vec![#lit]);
+                            }
+                        }
+                        self
+                    }
+                }
+            }
+            None => {
+                let option_unwrapped = unwrap_option(ty);
+                quote! {
+                    fn #ident(&mut self, #ident: #option_unwrapped) -> &mut Self {
+                        self.#ident = Some(#ident);
+                        self
+                    }
                 }
             }
         }
@@ -105,7 +164,7 @@ fn builder_build(data: &Data, struct_name: &Ident) -> TokenStream {
     let set_check = fields.named.iter().filter_map(|f| {
         let ident = &f.ident;
         let ty = &f.ty;
-        if type_is_option(ty) {
+        if type_is_option(ty) || type_is_vec(ty) {
             return None;
         }
         let err = format!("field `{}` is not set.", ident.as_ref().unwrap());
@@ -121,6 +180,10 @@ fn builder_build(data: &Data, struct_name: &Ident) -> TokenStream {
         if type_is_option(ty) {
             quote! {
                 #ident: self.#ident.clone()
+            }
+        } else if type_is_vec(ty) {
+            quote! {
+                #ident: self.#ident.clone().unwrap_or_else(Vec::new)
             }
         } else {
             quote! {
@@ -148,18 +211,53 @@ fn extract_fields(data: &Data) -> &FieldsNamed {
 }
 
 fn type_is_option(ty: &Type) -> bool {
+    type_is_contained_by(ty, "Option")
+}
+
+fn type_is_vec(ty: &Type) -> bool {
+    type_is_contained_by(ty, "Vec")
+}
+
+fn type_is_contained_by<T: AsRef<str>>(ty: &Type, container_type: T) -> bool {
+    let container_type = container_type.as_ref();
     extract_last_path_segment(ty)
-        .map(|path_seg| path_seg.ident == "Option")
+        .map(|path_seg| path_seg.ident == container_type)
         .unwrap_or(false)
 }
 
-fn option_inner_type(ty: &Type) -> &GenericArgument {
+fn unwrap_option(ty: &Type) -> &Type {
+    unwrap_generic_type(ty, "Option")
+}
+
+fn unwrap_vec(ty: &Type) -> &Type {
+    unwrap_generic_type(ty, "Vec")
+}
+
+fn unwrap_option_vec(ty: &Type) -> &Type {
+    unwrap_vec(unwrap_option(ty))
+}
+
+fn unwrap_generic_type<T: AsRef<str>>(ty: &Type, container_type: T) -> &Type {
+    let container_type = container_type.as_ref();
     extract_last_path_segment(ty)
-        .and_then(|path_seg| match path_seg.arguments {
-            PathArguments::AngleBracketed(ref gen_arg) => gen_arg.args.first(),
-            _ => None,
+        .and_then(|path_seg| {
+            if path_seg.ident != container_type {
+                return None;
+            }
+            match path_seg.arguments {
+                PathArguments::AngleBracketed(AngleBracketedGenericArguments {
+                    colon2_token: _,
+                    lt_token: _,
+                    ref args,
+                    gt_token: _,
+                }) => args.first().and_then(|a| match a {
+                    &GenericArgument::Type(ref inner_ty) => Some(inner_ty),
+                    _ => None,
+                }),
+                _ => None,
+            }
         })
-        .expect("Option wrapped type cannot be found.")
+        .unwrap_or(ty)
 }
 
 fn extract_last_path_segment(ty: &Type) -> Option<&PathSegment> {
